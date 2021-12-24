@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 )
 
 type (
@@ -78,6 +79,56 @@ func GetResponseCodeFromInt(n int) (ResponseCode, error) {
 	}
 
 	return rcode, nil
+}
+
+type Question struct {
+	Name  string
+	Type  *QTYPE
+	Class *QCLASS
+}
+
+func (q *Question) Encode(buf []byte) (int, error) {
+	wlen, err := EncodeDomainName(buf, q.Name)
+	if err != nil {
+		return wlen, fmt.Errorf("error while encoding domain name: %v", err)
+	}
+
+	wlen += copy(buf[wlen:], q.Type.Value)
+
+	wlen += copy(buf[wlen:], q.Class.Value)
+
+	return wlen, nil
+}
+
+func (q Question) String() string {
+	return fmt.Sprintf(`<Question Name: "%s", Type: "%s", Class: "%s"`, q.Name, q.Type, q.Class)
+}
+
+func ReadQuestionFrom(buf []byte) (int, *Question, error) {
+	bytesRead, name, err := DecodeDomainName(buf)
+	if err != nil {
+		return bytesRead, nil, err
+	}
+
+	qtype, err := bytesToQtype(buf[bytesRead : bytesRead+2])
+	if err != nil {
+		return bytesRead, nil, err
+	}
+	bytesRead += 2
+
+	qclass, err := bytesToClass(buf[bytesRead : bytesRead+2])
+	if err != nil {
+		return bytesRead, nil, err
+	}
+	bytesRead += 2
+
+	q := Question{
+		Name:  name,
+		Type:  qtype,
+		Class: qclass,
+	}
+
+	return bytesRead, &q, nil
 }
 
 type DNSServer struct {
@@ -267,13 +318,13 @@ func (srv *DNSServer) Listen() error {
 			log.Printf("Error: %v\n", err)
 		}
 
-		go srv.handleUDPPacket(conn, input, rlen, returnAddr)
+		go srv.handleUDPPacket(conn, input[:rlen], returnAddr)
 	}
 }
 
-func (srv *DNSServer) LookupRecords(recordType string, recordClass string, name string) *ResourceRecord {
+func (srv *DNSServer) LookupRecords(recordType *QTYPE, recordClass *QCLASS, name string) *ResourceRecord {
 	for _, r := range srv.records {
-		if r.Type.String() == recordType && r.Class.String() == recordClass && r.Name == name {
+		if r.Type == recordType && r.Class == recordClass && strings.ToLower(r.Name) == strings.ToLower(name) {
 			return r
 		}
 	}
@@ -287,11 +338,19 @@ func (srv DNSServer) setDefaultHeaders(h *DNSHeader) {
 	h.IsAuthoritative = false
 }
 
-func (srv *DNSServer) handleUDPPacket(conn *net.UDPConn, buf []byte, rlen int, returnAddr *net.UDPAddr) {
+func (srv *DNSServer) handleUDPPacket(conn *net.UDPConn, buf []byte, returnAddr *net.UDPAddr) {
 	log.Printf("got packet from %s\n", returnAddr.String())
 
+	rlen := 0
+
 	headers := DNSHeader{}
-	headers.ReadFrom(buf)
+	err := headers.ReadFrom(buf)
+	if err != nil {
+		log.Printf("error while reading header: %v", err)
+		return
+	}
+
+	rlen += 12
 
 	srv.setDefaultHeaders(&headers)
 
@@ -302,18 +361,63 @@ func (srv *DNSServer) handleUDPPacket(conn *net.UDPConn, buf []byte, rlen int, r
 		headers.ResponseCode = NotImplemented
 		headers.AnswersCount = 0
 
-		err := srv.RespondToUDP(conn, returnAddr, &headers, nil, nil, nil)
+		err := srv.RespondToUDP(conn, returnAddr, &headers, nil, nil, nil, nil)
 		if err != nil {
 			log.Printf("error while responding: %v", err)
+			return
 		}
 
 		return
 	}
 
+	questions := []*Question{}
+	answers := []*ResourceRecord{}
+	nameservers := []*ResourceRecord{}
+	additionals := []*ResourceRecord{}
+
+	for qi := uint16(0); qi < headers.QuestionsCount; qi++ {
+		bytesRead, q, err := ReadQuestionFrom(buf[rlen:])
+		rlen += bytesRead
+		if err != nil {
+			log.Printf("error while reading question %d: %v", qi+1, err)
+			return
+		}
+
+		questions = append(questions, q)
+
+		answersi, nameserversi, additionalsi, isAuthoritative := srv.GetAnswers(q)
+		headers.IsAuthoritative = isAuthoritative
+
+		if isAuthoritative && len(answersi) == 0 {
+			headers.ResponseCode = NameError
+		}
+
+		answers = append(answers, answersi...)
+		nameservers = append(nameservers, nameserversi...)
+		additionals = append(additionals, additionalsi...)
+	}
+
+	srv.RespondToUDP(conn, returnAddr, &headers, questions, answers, nameservers, additionals)
+
 	return
 }
 
-func (srv *DNSServer) RespondToUDP(conn *net.UDPConn, returnAddr *net.UDPAddr, headers *DNSHeader, answers []*ResourceRecord, nameservers []*ResourceRecord, additionalRecords []*ResourceRecord) error {
+func (srv *DNSServer) GetAnswers(q *Question) ([]*ResourceRecord, []*ResourceRecord, []*ResourceRecord, bool) {
+	log.Printf("getting answer for question: %s", q.String())
+
+	isAuthoritative := strings.HasSuffix(strings.ToLower(q.Name), "kausm.in")
+	answer := srv.LookupRecords(q.Type, q.Class, q.Name)
+
+	var answers []*ResourceRecord
+	if answer != nil {
+		answers = append(answers, answer)
+	}
+
+	return answers, nil, nil, isAuthoritative
+}
+
+func (srv *DNSServer) RespondToUDP(conn *net.UDPConn, returnAddr *net.UDPAddr, headers *DNSHeader, questions []*Question, answers []*ResourceRecord, nameservers []*ResourceRecord, additionalRecords []*ResourceRecord) error {
+	headers.QuestionsCount = uint16(len(questions))
 	headers.AnswersCount = uint16(len(answers))
 	headers.NameserversCount = uint16(len(nameservers))
 	headers.AdditionalRecordsCount = uint16(len(additionalRecords))
@@ -323,6 +427,15 @@ func (srv *DNSServer) RespondToUDP(conn *net.UDPConn, returnAddr *net.UDPAddr, h
 	bytesWritten, err := headers.Encode(buf)
 	if err != nil {
 		return err
+	}
+
+	for _, q := range questions {
+		n, err := q.Encode(buf[bytesWritten:])
+		if err != nil {
+			return err
+		}
+
+		bytesWritten += n
 	}
 
 	for _, rr := range answers {
@@ -352,8 +465,8 @@ func (srv *DNSServer) RespondToUDP(conn *net.UDPConn, returnAddr *net.UDPAddr, h
 		bytesWritten += n
 	}
 
-	log.Printf("writing to return addr: %s", returnAddr.String())
-	_, err = conn.WriteTo(buf, returnAddr)
+	log.Printf("writing to return addr: %s, bytes: %d", returnAddr.String(), bytesWritten)
+	_, err = conn.WriteTo(buf[:bytesWritten], returnAddr)
 	if err != nil {
 		return fmt.Errorf("error while writing to conn: %v", err)
 	}

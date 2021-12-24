@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -31,7 +32,7 @@ func (rr *ResourceRecord) Encode(buf []byte) (int, error) {
 	binary.BigEndian.PutUint16(buf[nWritten:], uint16(len(rr.Value)))
 	nWritten += 2
 
-	copy(buf[nWritten:], rr.Value)
+	nWritten += copy(buf[nWritten:], rr.Value)
 
 	return nWritten, nil
 }
@@ -162,7 +163,7 @@ func bytesToQtype(b []byte) (*QTYPE, error) {
 	code := binary.BigEndian.Uint16(b)
 	qtype, ok := uintToQtypeMap[code]
 	if !ok {
-		return nil, fmt.Errorf("unrecognized code: %d", code)
+		return nil, fmt.Errorf("unrecognized RR type code: %d", code)
 	}
 
 	return qtype, nil
@@ -191,11 +192,36 @@ func bytesToClass(b []byte) (*QCLASS, error) {
 
 	code := binary.BigEndian.Uint16(b)
 	if code != 1 {
-		return nil, fmt.Errorf("unsupported/unrecognized class code: %d", code)
+		return nil, fmt.Errorf("unsupported/unrecognized RR class code: %d", code)
 	}
 
 	// support only 1 class i.e. IN
 	return &ClassIN, nil
+}
+
+// DecodeDomainName returns bytes read, domain name, error
+func DecodeDomainName(buf []byte) (int, string, error) {
+	rlen := 0
+	labels := []string{}
+	for rlen < len(buf) {
+		if buf[rlen] == byte(0) {
+			rlen++
+			break
+		}
+
+		labelLen := int(buf[rlen])
+		rlen++
+
+		newLabel := make([]byte, labelLen)
+		copy(newLabel, buf[rlen:rlen+labelLen])
+
+		rlen += labelLen
+
+		labels = append(labels, strings.ToLower(string(newLabel)))
+	}
+
+	domainName := strings.Join(labels, ".")
+	return rlen, domainName, nil
 }
 
 func EncodeDomainName(buf []byte, name string) (int, error) {
