@@ -31,10 +31,10 @@ func TestEncodeDomainName(t *testing.T) {
 
 func TestEncodeRR(t *testing.T) {
 	rr := ResourceRecord{
-		Name: "testing.kausm.in",
-		Type: &TypeA,
+		Name:  "testing.kausm.in",
+		Type:  &TypeA,
 		Class: &ClassIN,
-		TTL: 4200,
+		TTL:   4200,
 		Value: []byte{42, 69, 255, 1},
 	}
 
