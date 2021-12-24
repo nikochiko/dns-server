@@ -1,11 +1,20 @@
 package main
 
 import (
+	"os"
+
 	"github.com/nikochiko/dns-server/server"
 )
 
 func main() {
-	srv, err := server.NewDNSServer("127.0.0.1:1053", "")
+	// default listen address
+	laddr := "127.0.0.1:1053"
+
+	if len(os.Args) > 1 {
+		laddr = os.Args[1]
+	}
+
+	srv, err := server.NewDNSServer(laddr, "")
 	if err != nil {
 		panic(err)
 	}
