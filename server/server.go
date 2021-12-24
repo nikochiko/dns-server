@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 )
 
@@ -53,12 +54,12 @@ func GetOpCodeFromInt(n int) (OpCode, error) {
 }
 
 const (
-	NoError ResponseCode = iota
-	FormatError
-	ServerFailure
-	NameError
-	NotImplemented
-	Refused
+	NoError        ResponseCode = 0
+	FormatError    ResponseCode = 1
+	ServerFailure  ResponseCode = 2
+	NameError      ResponseCode = 3
+	NotImplemented ResponseCode = 4
+	Refused        ResponseCode = 5
 )
 
 var responseCodeMap = map[uint8]ResponseCode{
@@ -77,14 +78,6 @@ func GetResponseCodeFromInt(n int) (ResponseCode, error) {
 	}
 
 	return rcode, nil
-}
-
-type ResourceRecord struct {
-	Type  string
-	Name  string
-	Class string
-	TTL   uint
-	Value string
 }
 
 type DNSServer struct {
@@ -207,12 +200,14 @@ func (h DNSHeader) encodeHeaderBits(buf []byte) {
 		headerBits |= uint16(1) << 7
 	}
 
-	headerBits |= uint16(h.ResponseCode)&(uint16(1)<<3|uint16(1)<<2|uint16(1)<<1|uint16(1))
+	headerBits |= uint16(h.ResponseCode) & (uint16(1)<<3 | uint16(1)<<2 | uint16(1)<<1 | uint16(1))
 
 	binary.BigEndian.PutUint16(buf, headerBits)
 }
 
-func (h DNSHeader) Encode(buf []byte) error {
+func (h DNSHeader) Encode(buf []byte) (int, error) {
+	// make the number of bytes return in output dynamic
+
 	binary.BigEndian.PutUint16(buf[:2], h.ID)
 	h.encodeHeaderBits(buf[2:4])
 	binary.BigEndian.PutUint16(buf[4:6], h.QuestionsCount)
@@ -220,7 +215,7 @@ func (h DNSHeader) Encode(buf []byte) error {
 	binary.BigEndian.PutUint16(buf[8:10], h.NameserversCount)
 	binary.BigEndian.PutUint16(buf[10:12], h.AdditionalRecordsCount)
 
-	return nil
+	return 12, nil
 }
 
 func NewDNSServer(laddr string, recordsFile string) (*DNSServer, error) {
@@ -228,14 +223,22 @@ func NewDNSServer(laddr string, recordsFile string) (*DNSServer, error) {
 
 	// TODO: read recordsFile
 	if recordsFile == "" {
-		record1 := ResourceRecord{
-			Type:  "A",
-			Name:  "test.kausm.in",
-			Class: "IN",
+		soa, _ := EncodeSOA("kausm.in", "kaustubh.kausm.in", 1, 600, 600, 600, 600)
+		soaRecord := ResourceRecord{
+			Type:  &TypeSOA,
+			Name:  "kausm.in",
+			Class: &ClassIN,
 			TTL:   600,
-			Value: "134.209.148.50",
+			Value: soa,
 		}
-		records = append(records, &record1)
+		record1 := ResourceRecord{
+			Type:  &TypeA,
+			Name:  "test.kausm.in",
+			Class: &ClassIN,
+			TTL:   600,
+			Value: []byte{134, 209, 148, 50},
+		}
+		records = append(records, &record1, &soaRecord)
 	}
 
 	srv := DNSServer{
@@ -246,12 +249,31 @@ func NewDNSServer(laddr string, recordsFile string) (*DNSServer, error) {
 	return &srv, nil
 }
 
-func (srv *DNSServer) Listen() {
+func (srv *DNSServer) Listen() error {
+	laddr, err := net.ResolveUDPAddr("udp", srv.laddr)
+	if err != nil {
+		return fmt.Errorf("error while resolving given listen addr: %v", err)
+	}
+
+	conn, err := net.ListenUDP("udp", laddr)
+	if err != nil {
+		return fmt.Errorf("error while listening for udp: %v", err)
+	}
+
+	for {
+		input := make([]byte, 512)
+		rlen, returnAddr, err := conn.ReadFromUDP(input)
+		if err != nil {
+			log.Printf("Error: %v\n", err)
+		}
+
+		go srv.handleUDPPacket(conn, input, rlen, returnAddr)
+	}
 }
 
 func (srv *DNSServer) LookupRecords(recordType string, recordClass string, name string) *ResourceRecord {
 	for _, r := range srv.records {
-		if r.Type == recordType && r.Class == recordClass && r.Name == name {
+		if r.Type.String() == recordType && r.Class.String() == recordClass && r.Name == name {
 			return r
 		}
 	}
@@ -259,9 +281,82 @@ func (srv *DNSServer) LookupRecords(recordType string, recordClass string, name 
 	return nil
 }
 
-func (srv *DNSServer) HandleConnection(conn net.UDPConn) {
+func (srv DNSServer) setDefaultHeaders(h *DNSHeader) {
+	h.RecursionAvailable = false
+	h.IsTruncated = false
+	h.IsAuthoritative = false
 }
 
-func parseHeaders(headers []byte) (*DNSHeader, error) {
-	return nil, nil
+func (srv *DNSServer) handleUDPPacket(conn *net.UDPConn, buf []byte, rlen int, returnAddr *net.UDPAddr) {
+	log.Printf("got packet from %s\n", returnAddr.String())
+
+	headers := DNSHeader{}
+	headers.ReadFrom(buf)
+
+	srv.setDefaultHeaders(&headers)
+
+	if headers.Type != QRQuery || headers.OpCode != QueryOp {
+		log.Printf("not implemented")
+
+		// only support standard query for now
+		headers.ResponseCode = NotImplemented
+		headers.AnswersCount = 0
+
+		err := srv.RespondToUDP(conn, returnAddr, &headers, nil, nil, nil)
+		if err != nil {
+			log.Printf("error while responding: %v", err)
+		}
+
+		return
+	}
+
+	return
+}
+
+func (srv *DNSServer) RespondToUDP(conn *net.UDPConn, returnAddr *net.UDPAddr, headers *DNSHeader, answers []*ResourceRecord, nameservers []*ResourceRecord, additionalRecords []*ResourceRecord) error {
+	headers.AnswersCount = uint16(len(answers))
+	headers.NameserversCount = uint16(len(nameservers))
+	headers.AdditionalRecordsCount = uint16(len(additionalRecords))
+
+	buf := make([]byte, 512)
+
+	bytesWritten, err := headers.Encode(buf)
+	if err != nil {
+		return err
+	}
+
+	for _, rr := range answers {
+		n, err := rr.Encode(buf[bytesWritten:])
+		if err != nil {
+			return err
+		}
+
+		bytesWritten += n
+	}
+
+	for _, rr := range nameservers {
+		n, err := rr.Encode(buf[bytesWritten:])
+		if err != nil {
+			return err
+		}
+
+		bytesWritten += n
+	}
+
+	for _, rr := range additionalRecords {
+		n, err := rr.Encode(buf[bytesWritten:])
+		if err != nil {
+			return err
+		}
+
+		bytesWritten += n
+	}
+
+	log.Printf("writing to return addr: %s", returnAddr.String())
+	_, err = conn.WriteTo(buf, returnAddr)
+	if err != nil {
+		return fmt.Errorf("error while writing to conn: %v", err)
+	}
+
+	return nil
 }
