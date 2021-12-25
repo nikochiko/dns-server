@@ -332,7 +332,8 @@ func (srv *DNSServer) LookupRecords(recordType *QTYPE, recordClass *QCLASS, name
 	return nil
 }
 
-func (srv DNSServer) setDefaultHeaders(h *DNSHeader) {
+func (srv DNSServer) setDefaultResponseHeaders(h *DNSHeader) {
+	h.Type = QRResponse
 	h.RecursionAvailable = false
 	h.IsTruncated = false
 	h.IsAuthoritative = false
@@ -352,7 +353,7 @@ func (srv *DNSServer) handleUDPPacket(conn *net.UDPConn, buf []byte, returnAddr 
 
 	rlen += 12
 
-	srv.setDefaultHeaders(&headers)
+	srv.setDefaultResponseHeaders(&headers)
 
 	if headers.Type != QRQuery || headers.OpCode != QueryOp {
 		log.Printf("not implemented")
