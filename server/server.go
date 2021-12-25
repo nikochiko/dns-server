@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -254,6 +255,8 @@ func (h DNSHeader) encodeHeaderBits(buf []byte) {
 	headerBits |= uint16(h.ResponseCode) & (uint16(1)<<3 | uint16(1)<<2 | uint16(1)<<1 | uint16(1))
 
 	binary.BigEndian.PutUint16(buf, headerBits)
+
+	fmt.Printf("%s\n", hex.Dump(buf[:2]))
 }
 
 func (h DNSHeader) Encode(buf []byte) (int, error) {
@@ -332,8 +335,7 @@ func (srv *DNSServer) LookupRecords(recordType *QTYPE, recordClass *QCLASS, name
 	return nil
 }
 
-func (srv DNSServer) setDefaultResponseHeaders(h *DNSHeader) {
-	h.Type = QRResponse
+func (srv DNSServer) setDefaultHeaders(h *DNSHeader) {
 	h.RecursionAvailable = false
 	h.IsTruncated = false
 	h.IsAuthoritative = false
@@ -353,7 +355,7 @@ func (srv *DNSServer) handleUDPPacket(conn *net.UDPConn, buf []byte, returnAddr 
 
 	rlen += 12
 
-	srv.setDefaultResponseHeaders(&headers)
+	srv.setDefaultHeaders(&headers)
 
 	if headers.Type != QRQuery || headers.OpCode != QueryOp {
 		log.Printf("not implemented")
@@ -418,6 +420,7 @@ func (srv *DNSServer) GetAnswers(q *Question) ([]*ResourceRecord, []*ResourceRec
 }
 
 func (srv *DNSServer) RespondToUDP(conn *net.UDPConn, returnAddr *net.UDPAddr, headers *DNSHeader, questions []*Question, answers []*ResourceRecord, nameservers []*ResourceRecord, additionalRecords []*ResourceRecord) error {
+	headers.Type = QRResponse
 	headers.QuestionsCount = uint16(len(questions))
 	headers.AnswersCount = uint16(len(answers))
 	headers.NameserversCount = uint16(len(nameservers))
